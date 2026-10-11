@@ -1,0 +1,25 @@
+.vjt-fab {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 999px;
+  background: #2563eb;
+  color: #fff;
+  font: 600 13px/1 system-ui, -apple-system, "Noto Sans TC", sans-serif;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+.vjt-fab.vjt-off { background: #6b7280; }
+.vjt-fab.vjt-busy { opacity: 0.7; cursor: progress; }
+
+.vjt-orig {
+  display: block;
+  color: #6b7280;
+  font-size: 0.9em;
+  border-left: 3px solid #d1d5db;
+  padding-left: 8px;
+  margin: 2px 0;
+}

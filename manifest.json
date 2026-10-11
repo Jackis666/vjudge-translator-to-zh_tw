@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "VJudge 題目自動翻譯",
+  "version": "1.0.0",
+  "description": "自動將 vjudge.net 的題目描述翻譯成繁體中文(支援取代或雙語對照)。",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://vjudge.net/*",
+    "https://translate.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://vjudge.net/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "all_frames": true,
+      "match_about_blank": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "VJudge 題目翻譯",
+    "default_popup": "popup.html"
+  }
+}

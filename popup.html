@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 240px; margin: 0; padding: 14px; font: 14px/1.5 system-ui, -apple-system, "Noto Sans TC", sans-serif; }
+    h1 { font-size: 15px; margin: 0 0 10px; }
+    label { display: block; margin: 8px 0 3px; color: #374151; }
+    select { width: 100%; padding: 4px; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    small { display: block; margin-top: 10px; color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>VJudge 題目翻譯</h1>
+  <div class="row">
+    <input type="checkbox" id="enabled">
+    <label for="enabled" style="margin:0">自動翻譯成繁體中文</label>
+  </div>
+  <label for="mode">顯示方式</label>
+  <select id="mode">
+    <option value="replace">直接取代原文</option>
+    <option value="bilingual">雙語對照(原文在上)</option>
+  </select>
+  <small>修改後會立即套用到已開啟的 vjudge 頁面。</small>
+  <script src="popup.js"></script>
+</body>
+</html>
