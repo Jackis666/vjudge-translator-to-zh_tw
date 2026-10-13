@@ -160,12 +160,20 @@
   const toTraditional = (text) => [...text].map((ch) => S2T.get(ch) || ch).join("");
 
   /* ---------- 叫翻譯 ---------- */
+  const RELOADED_MSG = "擴充功能已重新載入,請重新整理頁面";
+  let lastTranslateError = null; // 最近一次翻譯失敗的原因,PDF 面板全部失敗時顯示
+
   function translateText(text) {
     return new Promise((resolve, reject) => {
+      // 擴充功能重新載入後,頁面上舊的 content script 會跟擴充功能斷線
+      if (!chrome.runtime || !chrome.runtime.id) return reject(new Error(RELOADED_MSG));
       chrome.runtime.sendMessage(
         { type: "translate", text, target: TARGET_LANG },
         (resp) => {
-          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (chrome.runtime.lastError) {
+            const m = chrome.runtime.lastError.message || "";
+            return reject(new Error(/context invalidated/i.test(m) ? RELOADED_MSG : m));
+          }
           if (!resp || !resp.ok) return reject(new Error(resp ? resp.error : "no response"));
           resolve(toTraditional(resp.result));
         }
@@ -185,6 +193,7 @@
     } catch (e) {
       // 請求失敗(例如被限流)就整批放棄,不要再逐段狂發請求
       console.warn("[vjudge-translator] batch failed:", e);
+      lastTranslateError = e.message;
       return [];
     }
     if (!parts) {
@@ -341,22 +350,34 @@
       btn.disabled = true;
       btn.textContent = "解析 PDF 中…";
       try {
-        const pages = await extractPdf(url);
+        const result = await extractPdf(url);
         if (myRun !== runId) return;
         btn.textContent = "翻譯中…";
-        panel = await buildPanel(pages, myRun);
+        panel = await buildPanel(result, myRun);
         if (!panel) return;
         el.insertAdjacentElement("afterend", panel);
         pdfEls.push(panel);
         btn.textContent = "隱藏翻譯";
       } catch (e) {
         console.warn("[vjudge-translator] pdf failed:", e);
-        btn.textContent = label + "(失敗,點擊重試)";
+        btn.textContent = `${label}失敗:${e.message}(點擊重試)`;
         btn.title = e.message;
       } finally {
         btn.disabled = false;
       }
     });
+  }
+
+  // 從網址拿題號:/problem/Gym-100502H → "H"(整份題本的 PDF 只翻這一題)
+  function problemLetter() {
+    let path = location.pathname;
+    try {
+      path = window.top.location.pathname; // 題目在 iframe 裡時,題號在上層頁面的網址
+    } catch (e) {
+      // 跨網域就用自己的網址
+    }
+    const m = path.match(/\/problem\/[A-Za-z]+-\d+([A-Za-z])\d*\/?$/);
+    return m ? m[1].toUpperCase() : null;
   }
 
   // 交給 pdf-main.js(頁面本身的 world)用 vjudge 的 pdf.js 抽文字
@@ -365,30 +386,35 @@
     const id = ++pdfReqId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => done(new Error("解析 PDF 逾時")), 60000);
-      function done(err, pages) {
+      function done(err, result) {
         clearTimeout(timer);
         window.removeEventListener("message", onMsg);
-        err ? reject(err) : resolve(pages);
+        err ? reject(err) : resolve(result);
       }
       function onMsg(e) {
         const msg = e.data;
         if (e.source !== window || !msg || msg.vjt !== "pdf-result" || msg.id !== id) return;
-        msg.ok ? done(null, msg.pages) : done(new Error(msg.error));
+        msg.ok ? done(null, msg.result) : done(new Error(msg.error));
       }
       window.addEventListener("message", onMsg);
-      window.postMessage({ vjt: "pdf-request", id, url }, "*");
+      window.postMessage({ vjt: "pdf-request", id, url, problem: problemLetter() }, "*");
     });
   }
 
-  async function buildPanel(pages, myRun) {
+  async function buildPanel({ pages, total, problem }, myRun) {
     const items = [];
-    // 測資(code)原樣顯示,不送去翻譯
-    pages.forEach((page) => page.blocks.forEach((b) => b.code || items.push({ text: b.text })));
+    // 測資(code)與公式(math)原樣顯示,不送去翻譯
+    pages.forEach((page) => page.blocks.forEach((b) => b.code || b.math || items.push({ text: b.text })));
     const translated = new Map();
+    lastTranslateError = null;
     await translateAll(items, myRun, (results) =>
       results.forEach((r) => translated.set(r.text, r.result))
     );
     if (myRun !== runId) return null;
+    // 一段都沒翻成功就報錯,不要默默顯示整面英文
+    if (items.length && ![...translated.values()].some(Boolean)) {
+      throw new Error(lastTranslateError || "翻譯服務沒有回應");
+    }
 
     const panel = document.createElement("div");
     panel.className = "vjt-panel";
@@ -397,14 +423,33 @@
       div.className = cls;
       div.textContent = text;
       panel.appendChild(div);
+      return div;
     };
-    pages.forEach((page, p) => {
-      if (pages.length > 1) add("vjt-panel-page", `第 ${p + 1} 頁`);
+    if (problem) {
+      const range = pages.length > 1 ? `${pages[0].num}–${pages[pages.length - 1].num}` : `${pages[0].num}`;
+      add("vjt-panel-note", `這份 PDF 有 ${total} 頁,只翻譯 Problem ${problem}(第 ${range} 頁)`);
+    }
+    pages.forEach((page) => {
+      if (total > 1) add("vjt-panel-page", `第 ${page.num} 頁`);
       if (page.scanned) add("vjt-panel-note", "(這頁是掃描圖片,目前還不支援 OCR)");
       // 原文就是上面的 PDF,面板只放譯文;翻譯失敗才放原文
-      for (const { text, code } of page.blocks) {
+      for (const { text, code, math, img, imgWidth } of page.blocks) {
         if (code) {
           add("vjt-panel-code", text, "pre");
+          continue;
+        }
+        if (math) {
+          // 公式是從 PDF 截下來的圖;截圖失敗就提示看原檔(抽出來的文字排版是亂的,不顯示)
+          if (img && /^data:image\/png;base64,/.test(img)) {
+            const wrap = add("vjt-panel-math", "");
+            const im = document.createElement("img");
+            im.src = img;
+            im.alt = "公式";
+            if (imgWidth) im.style.width = imgWidth + "px";
+            wrap.appendChild(im);
+          } else {
+            add("vjt-panel-note", "(公式,請見上方 PDF)");
+          }
           continue;
         }
         const zh = translated.get(text);
