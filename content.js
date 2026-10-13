@@ -11,9 +11,10 @@
   ]);
   const SKIP_SELECTOR =
     ".katex, .MathJax, .MathJax_Preview, mjx-container, .vjt-orig, .vjt-fab, pre, code, " +
-    ".vjudge-pdf";
+    ".vjudge-pdf, .vjt-pdf-btn, .vjt-panel";
   // 保護數學式($$$...$$$、$...$、\( \)、\[ \])與引號內的輸出字串("YES"、'#')
-  const MATH_RE = /\$\$\$[\s\S]*?\$\$\$|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$[^$\n]+\$|"[^"\n]{1,40}"|“[^”\n]{1,40}”|‘[^’\n]{1,40}’|(?<![A-Za-z])'[^'\n]{1,20}'(?![A-Za-z])/g;
+  // \uE000…\uE001 是 pdf-main.js 標記的 PDF 數學式;". . ." 省略號也保留(否則會被翻成句號)
+  const MATH_RE = /\uE000[^\uE001]*\uE001|(?:\.[ \t]?){2,}\.|\$\$\$[\s\S]*?\$\$\$|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$[^$\n]+\$|"[^"\n]{1,40}"|“[^”\n]{1,40}”|‘[^’\n]{1,40}’|(?<![A-Za-z])'[^'\n]{1,20}'(?![A-Za-z])/g;
   const HAS_LATIN = /[A-Za-z]{2,}/;
   const HAS_CJK = /[\u4e00-\u9fff]/;
   // 整個元素原封不動保留(數學式、程式碼、按鈕…)
@@ -30,6 +31,7 @@
   let settings = { enabled: true, mode: "replace" };
   const originals = new Map(); // 段落元素 -> 原本的 childNodes
   const bilingualEls = [];     // 雙語模式新增的元素
+  const pdfEls = [];           // PDF 旁新增的按鈕與面板
   let running = false;
   let pending = false; // 翻譯中又有新內容,結束後再跑一次
   let runId = 0;
@@ -149,15 +151,31 @@
     return keys(sent) === keys(got);
   }
 
+  /* ---------- 簡轉繁 ---------- */
+  const S2T = new Map();
+  {
+    const pairs = [...(globalThis.VJT_S2T_PAIRS || "")];
+    for (let i = 0; i + 1 < pairs.length; i += 2) S2T.set(pairs[i], pairs[i + 1]);
+  }
+  const toTraditional = (text) => [...text].map((ch) => S2T.get(ch) || ch).join("");
+
   /* ---------- 叫翻譯 ---------- */
+  const RELOADED_MSG = "擴充功能已重新載入,請重新整理頁面";
+  let lastTranslateError = null; // 最近一次翻譯失敗的原因,PDF 面板全部失敗時顯示
+
   function translateText(text) {
     return new Promise((resolve, reject) => {
+      // 擴充功能重新載入後,頁面上舊的 content script 會跟擴充功能斷線
+      if (!chrome.runtime || !chrome.runtime.id) return reject(new Error(RELOADED_MSG));
       chrome.runtime.sendMessage(
         { type: "translate", text, target: TARGET_LANG },
         (resp) => {
-          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (chrome.runtime.lastError) {
+            const m = chrome.runtime.lastError.message || "";
+            return reject(new Error(/context invalidated/i.test(m) ? RELOADED_MSG : m));
+          }
           if (!resp || !resp.ok) return reject(new Error(resp ? resp.error : "no response"));
-          resolve(resp.result);
+          resolve(toTraditional(resp.result));
         }
       );
     });
@@ -175,6 +193,7 @@
     } catch (e) {
       // 請求失敗(例如被限流)就整批放棄,不要再逐段狂發請求
       console.warn("[vjudge-translator] batch failed:", e);
+      lastTranslateError = e.message;
       return [];
     }
     if (!parts) {
@@ -244,6 +263,8 @@
     }
     originals.clear();
     bilingualEls.splice(0).forEach((el) => el.remove());
+    pdfEls.splice(0).forEach((el) => el.remove());
+    document.querySelectorAll("[data-vjt-pdf]").forEach((el) => delete el.dataset.vjtPdf);
   }
 
   // 分批後以 3 個並行請求翻譯,每批完成就呼叫 onResults
@@ -299,13 +320,155 @@
     if (pending) translatePage();
   }
 
+  /* ---------- PDF(按需翻譯) ---------- */
+  function setupPdfButtons() {
+    for (const root of getRoots()) {
+      for (const el of root.querySelectorAll(".vjudge-pdf[data-pdf-url]")) addPdfButton(el);
+    }
+  }
+
+  function addPdfButton(el) {
+    if (el.dataset.vjtPdf) return;
+    el.dataset.vjtPdf = "1";
+    const url = new URL(el.dataset.pdfUrl, location.href).href;
+    const label = "翻譯此 PDF";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "vjt-pdf-btn";
+    btn.textContent = label;
+    el.insertAdjacentElement("beforebegin", btn);
+    pdfEls.push(btn);
+
+    let panel = null;
+    btn.addEventListener("click", async () => {
+      if (panel) {
+        panel.hidden = !panel.hidden;
+        btn.textContent = panel.hidden ? "顯示翻譯" : "隱藏翻譯";
+        return;
+      }
+      const myRun = runId;
+      btn.disabled = true;
+      btn.textContent = "解析 PDF 中…";
+      try {
+        const result = await extractPdf(url);
+        if (myRun !== runId) return;
+        btn.textContent = "翻譯中…";
+        panel = await buildPanel(result, myRun);
+        if (!panel) return;
+        el.insertAdjacentElement("afterend", panel);
+        pdfEls.push(panel);
+        btn.textContent = "隱藏翻譯";
+      } catch (e) {
+        console.warn("[vjudge-translator] pdf failed:", e);
+        btn.textContent = `${label}失敗:${e.message}(點擊重試)`;
+        btn.title = e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  // 從網址拿題號:/problem/Gym-100502H → "H"(整份題本的 PDF 只翻這一題)
+  function problemLetter() {
+    let path = location.pathname;
+    try {
+      path = window.top.location.pathname; // 題目在 iframe 裡時,題號在上層頁面的網址
+    } catch (e) {
+      // 跨網域就用自己的網址
+    }
+    const m = path.match(/\/problem\/[A-Za-z]+-\d+([A-Za-z])\d*\/?$/);
+    return m ? m[1].toUpperCase() : null;
+  }
+
+  // 交給 pdf-main.js(頁面本身的 world)用 vjudge 的 pdf.js 抽文字
+  let pdfReqId = 0;
+  function extractPdf(url) {
+    const id = ++pdfReqId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => done(new Error("解析 PDF 逾時")), 60000);
+      function done(err, result) {
+        clearTimeout(timer);
+        window.removeEventListener("message", onMsg);
+        err ? reject(err) : resolve(result);
+      }
+      function onMsg(e) {
+        const msg = e.data;
+        if (e.source !== window || !msg || msg.vjt !== "pdf-result" || msg.id !== id) return;
+        msg.ok ? done(null, msg.result) : done(new Error(msg.error));
+      }
+      window.addEventListener("message", onMsg);
+      window.postMessage({ vjt: "pdf-request", id, url, problem: problemLetter() }, "*");
+    });
+  }
+
+  async function buildPanel({ pages, total, problem }, myRun) {
+    const items = [];
+    // 測資(code)與公式(math)原樣顯示,不送去翻譯
+    pages.forEach((page) => page.blocks.forEach((b) => b.code || b.math || items.push({ text: b.text })));
+    const translated = new Map();
+    lastTranslateError = null;
+    await translateAll(items, myRun, (results) =>
+      results.forEach((r) => translated.set(r.text, r.result))
+    );
+    if (myRun !== runId) return null;
+    // 一段都沒翻成功就報錯,不要默默顯示整面英文
+    if (items.length && ![...translated.values()].some(Boolean)) {
+      throw new Error(lastTranslateError || "翻譯服務沒有回應");
+    }
+
+    const panel = document.createElement("div");
+    panel.className = "vjt-panel";
+    const add = (cls, text, tag = "div") => {
+      const div = document.createElement(tag);
+      div.className = cls;
+      div.textContent = text;
+      panel.appendChild(div);
+      return div;
+    };
+    if (problem) {
+      const range = pages.length > 1 ? `${pages[0].num}–${pages[pages.length - 1].num}` : `${pages[0].num}`;
+      add("vjt-panel-note", `這份 PDF 有 ${total} 頁,只翻譯 Problem ${problem}(第 ${range} 頁)`);
+    }
+    pages.forEach((page) => {
+      if (total > 1) add("vjt-panel-page", `第 ${page.num} 頁`);
+      if (page.scanned) add("vjt-panel-note", "(這頁是掃描圖片,目前還不支援 OCR)");
+      // 原文就是上面的 PDF,面板只放譯文;翻譯失敗才放原文
+      for (const { text, code, math, img, imgWidth } of page.blocks) {
+        if (code) {
+          add("vjt-panel-code", text, "pre");
+          continue;
+        }
+        if (math) {
+          // 公式是從 PDF 截下來的圖;截圖失敗就提示看原檔(抽出來的文字排版是亂的,不顯示)
+          if (img && /^data:image\/png;base64,/.test(img)) {
+            const wrap = add("vjt-panel-math", "");
+            const im = document.createElement("img");
+            im.src = img;
+            im.alt = "公式";
+            if (imgWidth) im.style.width = imgWidth + "px";
+            wrap.appendChild(im);
+          } else {
+            add("vjt-panel-note", "(公式,請見上方 PDF)");
+          }
+          continue;
+        }
+        const zh = translated.get(text);
+        add(zh ? "vjt-panel-zh" : "vjt-panel-note", (zh || text).replace(/[\uE000\uE001]/g, ""));
+      }
+    });
+    return panel;
+  }
+
   function observeLateContent() {
     if (observer || !document.body) return;
     let timer = null;
     observer = new MutationObserver(() => {
       if (!settings.enabled) return;
       clearTimeout(timer);
-      timer = setTimeout(translatePage, 600);
+      timer = setTimeout(() => {
+        setupPdfButtons();
+        translatePage();
+      }, 600);
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
@@ -338,6 +501,7 @@
     updateFab();
     if (settings.enabled) {
       running = false;
+      setupPdfButtons();
       await translatePage();
       observeLateContent();
     }
