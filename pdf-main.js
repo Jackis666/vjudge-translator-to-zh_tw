@@ -36,8 +36,9 @@
     let cur = null;
     for (const it of items) {
       if (!("str" in it)) continue;
-      if (!cur) cur = { text: "", y: it.transform[5], h: it.height || 10, mono: 0, prop: 0 };
+      if (!cur) cur = { text: "", parts: [], y: it.transform[5], h: it.height || 10, mono: 0, prop: 0 };
       cur.text += it.str;
+      cur.parts.push({ str: it.str, font: it.fontName });
       if (it.height) cur.h = Math.max(cur.h, it.height);
       // 換行標記是空字串且帶著下一行的字型,不能算進去
       const n = it.str.replace(/\s/g, "").length;
@@ -56,6 +57,7 @@
       const t = l.text.trim();
       l.code = (l.mono > 0 && l.prop === 0) || (DATA_LINE_RE.test(t) && /\d/.test(t));
     }
+    markMath(lines, styles);
 
     // 文字:行距明顯變大、空行、或上一行明顯較短(標題、段落最後一行)就換段
     // 測資:連續的測資行合併成一塊,保留換行
@@ -95,6 +97,51 @@
       b.text = rows.map((r) => r.slice(indent)).join("\n");
     }
     return blocks;
+  }
+
+  // PDF 沒有數學標籤,只能看字型:LaTeX 的數學變數(CMMI…)、下標、符號用的字型和內文不同。
+  // 內文行裡「非主要字型且沒有長單字」的連續片段(例如 s1、si、|si − sj|)、
+  // 以及等寬字型的片段(例如 YES),用 \uE000…\uE001 包起來,content.js 會保護它不被翻譯
+  function markMath(lines, styles) {
+    const count = new Map();
+    for (const l of lines) {
+      if (l.code) continue;
+      for (const p of l.parts) {
+        count.set(p.font, (count.get(p.font) || 0) + p.str.replace(/\s/g, "").length);
+      }
+    }
+    let body = null;
+    for (const [font, n] of count) if (!body || n > count.get(body)) body = font;
+    if (!body) return;
+    const isMono = (font) => styles[font] && styles[font].fontFamily === "monospace";
+
+    for (const l of lines) {
+      // 整行都不是內文字型(標題)就不動
+      if (l.code || !l.parts.some((p) => p.font === body && /[A-Za-z]/.test(p.str))) continue;
+      let text = "";
+      let run = null; // 目前累積的非內文片段
+      let runMono = false;
+      const flush = () => {
+        if (run === null) return;
+        const core = run.trim();
+        const keep = core && (runMono || !/[A-Za-z]{4,}/.test(core));
+        text += keep ? run.replace(core, "\uE000" + core + "\uE001") : run;
+        run = null;
+        runMono = false;
+      };
+      for (const p of l.parts) {
+        const other = p.font !== body;
+        if (other || (run !== null && !p.str.trim())) {
+          run = (run || "") + p.str;
+          runMono = runMono || (other && isMono(p.font));
+        } else {
+          flush();
+          text += p.str;
+        }
+      }
+      flush();
+      l.text = text;
+    }
   }
 
   async function extract(url) {

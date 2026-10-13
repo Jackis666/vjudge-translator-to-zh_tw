@@ -13,7 +13,8 @@
     ".katex, .MathJax, .MathJax_Preview, mjx-container, .vjt-orig, .vjt-fab, pre, code, " +
     ".vjudge-pdf, .vjt-pdf-btn, .vjt-panel";
   // 保護數學式($$$...$$$、$...$、\( \)、\[ \])與引號內的輸出字串("YES"、'#')
-  const MATH_RE = /\$\$\$[\s\S]*?\$\$\$|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$[^$\n]+\$|"[^"\n]{1,40}"|“[^”\n]{1,40}”|‘[^’\n]{1,40}’|(?<![A-Za-z])'[^'\n]{1,20}'(?![A-Za-z])/g;
+  // \uE000…\uE001 是 pdf-main.js 標記的 PDF 數學式;". . ." 省略號也保留(否則會被翻成句號)
+  const MATH_RE = /\uE000[^\uE001]*\uE001|(?:\.[ \t]?){2,}\.|\$\$\$[\s\S]*?\$\$\$|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$[^$\n]+\$|"[^"\n]{1,40}"|“[^”\n]{1,40}”|‘[^’\n]{1,40}’|(?<![A-Za-z])'[^'\n]{1,20}'(?![A-Za-z])/g;
   const HAS_LATIN = /[A-Za-z]{2,}/;
   const HAS_CJK = /[\u4e00-\u9fff]/;
   // 整個元素原封不動保留(數學式、程式碼、按鈕…)
@@ -150,6 +151,14 @@
     return keys(sent) === keys(got);
   }
 
+  /* ---------- 簡轉繁 ---------- */
+  const S2T = new Map();
+  {
+    const pairs = [...(globalThis.VJT_S2T_PAIRS || "")];
+    for (let i = 0; i + 1 < pairs.length; i += 2) S2T.set(pairs[i], pairs[i + 1]);
+  }
+  const toTraditional = (text) => [...text].map((ch) => S2T.get(ch) || ch).join("");
+
   /* ---------- 叫翻譯 ---------- */
   function translateText(text) {
     return new Promise((resolve, reject) => {
@@ -158,7 +167,7 @@
         (resp) => {
           if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
           if (!resp || !resp.ok) return reject(new Error(resp ? resp.error : "no response"));
-          resolve(resp.result);
+          resolve(toTraditional(resp.result));
         }
       );
     });
@@ -399,7 +408,7 @@
           continue;
         }
         const zh = translated.get(text);
-        add(zh ? "vjt-panel-zh" : "vjt-panel-note", zh || text);
+        add(zh ? "vjt-panel-zh" : "vjt-panel-note", (zh || text).replace(/[\uE000\uE001]/g, ""));
       }
     });
     return panel;
