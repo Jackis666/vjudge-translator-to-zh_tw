@@ -11,7 +11,7 @@
   ]);
   const SKIP_SELECTOR =
     ".katex, .MathJax, .MathJax_Preview, mjx-container, .vjt-orig, .vjt-fab, pre, code, " +
-    ".vjudge-pdf";
+    ".vjudge-pdf, .vjt-pdf-btn, .vjt-panel";
   // 保護數學式($$$...$$$、$...$、\( \)、\[ \])與引號內的輸出字串("YES"、'#')
   const MATH_RE = /\$\$\$[\s\S]*?\$\$\$|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$[^$\n]+\$|"[^"\n]{1,40}"|“[^”\n]{1,40}”|‘[^’\n]{1,40}’|(?<![A-Za-z])'[^'\n]{1,20}'(?![A-Za-z])/g;
   const HAS_LATIN = /[A-Za-z]{2,}/;
@@ -30,6 +30,7 @@
   let settings = { enabled: true, mode: "replace" };
   const originals = new Map(); // 段落元素 -> 原本的 childNodes
   const bilingualEls = [];     // 雙語模式新增的元素
+  const pdfEls = [];           // PDF 旁新增的按鈕與面板
   let running = false;
   let pending = false; // 翻譯中又有新內容,結束後再跑一次
   let runId = 0;
@@ -244,6 +245,8 @@
     }
     originals.clear();
     bilingualEls.splice(0).forEach((el) => el.remove());
+    pdfEls.splice(0).forEach((el) => el.remove());
+    document.querySelectorAll("[data-vjt-pdf]").forEach((el) => delete el.dataset.vjtPdf);
   }
 
   // 分批後以 3 個並行請求翻譯,每批完成就呼叫 onResults
@@ -299,13 +302,119 @@
     if (pending) translatePage();
   }
 
+  /* ---------- PDF(按需翻譯) ---------- */
+  function setupPdfButtons() {
+    for (const root of getRoots()) {
+      for (const el of root.querySelectorAll(".vjudge-pdf[data-pdf-url]")) addPdfButton(el);
+    }
+  }
+
+  function addPdfButton(el) {
+    if (el.dataset.vjtPdf) return;
+    el.dataset.vjtPdf = "1";
+    const url = new URL(el.dataset.pdfUrl, location.href).href;
+    const label = "翻譯此 PDF";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "vjt-pdf-btn";
+    btn.textContent = label;
+    el.insertAdjacentElement("beforebegin", btn);
+    pdfEls.push(btn);
+
+    let panel = null;
+    btn.addEventListener("click", async () => {
+      if (panel) {
+        panel.hidden = !panel.hidden;
+        btn.textContent = panel.hidden ? "顯示翻譯" : "隱藏翻譯";
+        return;
+      }
+      const myRun = runId;
+      btn.disabled = true;
+      btn.textContent = "解析 PDF 中…";
+      try {
+        const pages = await extractPdf(url);
+        if (myRun !== runId) return;
+        btn.textContent = "翻譯中…";
+        panel = await buildPanel(pages, myRun);
+        if (!panel) return;
+        el.insertAdjacentElement("afterend", panel);
+        pdfEls.push(panel);
+        btn.textContent = "隱藏翻譯";
+      } catch (e) {
+        console.warn("[vjudge-translator] pdf failed:", e);
+        btn.textContent = label + "(失敗,點擊重試)";
+        btn.title = e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  // 交給 pdf-main.js(頁面本身的 world)用 vjudge 的 pdf.js 抽文字
+  let pdfReqId = 0;
+  function extractPdf(url) {
+    const id = ++pdfReqId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => done(new Error("解析 PDF 逾時")), 60000);
+      function done(err, pages) {
+        clearTimeout(timer);
+        window.removeEventListener("message", onMsg);
+        err ? reject(err) : resolve(pages);
+      }
+      function onMsg(e) {
+        const msg = e.data;
+        if (e.source !== window || !msg || msg.vjt !== "pdf-result" || msg.id !== id) return;
+        msg.ok ? done(null, msg.pages) : done(new Error(msg.error));
+      }
+      window.addEventListener("message", onMsg);
+      window.postMessage({ vjt: "pdf-request", id, url }, "*");
+    });
+  }
+
+  async function buildPanel(pages, myRun) {
+    const items = [];
+    // 測資(code)原樣顯示,不送去翻譯
+    pages.forEach((page) => page.blocks.forEach((b) => b.code || items.push({ text: b.text })));
+    const translated = new Map();
+    await translateAll(items, myRun, (results) =>
+      results.forEach((r) => translated.set(r.text, r.result))
+    );
+    if (myRun !== runId) return null;
+
+    const panel = document.createElement("div");
+    panel.className = "vjt-panel";
+    const add = (cls, text, tag = "div") => {
+      const div = document.createElement(tag);
+      div.className = cls;
+      div.textContent = text;
+      panel.appendChild(div);
+    };
+    pages.forEach((page, p) => {
+      if (pages.length > 1) add("vjt-panel-page", `第 ${p + 1} 頁`);
+      if (page.scanned) add("vjt-panel-note", "(這頁是掃描圖片,目前還不支援 OCR)");
+      // 原文就是上面的 PDF,面板只放譯文;翻譯失敗才放原文
+      for (const { text, code } of page.blocks) {
+        if (code) {
+          add("vjt-panel-code", text, "pre");
+          continue;
+        }
+        const zh = translated.get(text);
+        add(zh ? "vjt-panel-zh" : "vjt-panel-note", zh || text);
+      }
+    });
+    return panel;
+  }
+
   function observeLateContent() {
     if (observer || !document.body) return;
     let timer = null;
     observer = new MutationObserver(() => {
       if (!settings.enabled) return;
       clearTimeout(timer);
-      timer = setTimeout(translatePage, 600);
+      timer = setTimeout(() => {
+        setupPdfButtons();
+        translatePage();
+      }, 600);
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
@@ -338,6 +447,7 @@
     updateFab();
     if (settings.enabled) {
       running = false;
+      setupPdfButtons();
       await translatePage();
       observeLateContent();
     }

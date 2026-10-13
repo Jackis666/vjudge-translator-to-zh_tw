@@ -23,3 +23,39 @@
   padding-left: 8px;
   margin: 2px 0;
 }
+
+.vjt-pdf-btn {
+  display: inline-block;
+  margin: 4px 0;
+  padding: 4px 10px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #2563eb;
+  font: 600 12px/1.4 system-ui, -apple-system, "Noto Sans TC", sans-serif;
+  cursor: pointer;
+}
+.vjt-pdf-btn:disabled { opacity: 0.6; cursor: progress; }
+
+.vjt-panel {
+  margin: 8px 0 16px;
+  padding: 10px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: #111827;
+  line-height: 1.6;
+}
+.vjt-panel-page { margin: 10px 0 4px; font-weight: 600; color: #2563eb; }
+.vjt-panel-page:first-child { margin-top: 0; }
+.vjt-panel-zh { margin: 6px 0; }
+.vjt-panel-note { margin: 6px 0; color: #6b7280; font-size: 0.9em; }
+.vjt-panel-code {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #eef0f3;
+  font: 13px/1.5 ui-monospace, Consolas, monospace;
+  white-space: pre;
+  overflow-x: auto;
+}
